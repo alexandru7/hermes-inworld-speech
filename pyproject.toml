@@ -1,0 +1,15 @@
+# This project is a drop-in Hermes plugin directory, not a pip-installable
+# distribution, so there is no [project] or [build-system] table. The sections
+# below configure the dev tooling only.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+# Matches the oldest interpreter exercised in CI.
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

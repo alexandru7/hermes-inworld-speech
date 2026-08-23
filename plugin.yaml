@@ -1,0 +1,17 @@
+# Requires a Hermes Agent build that exposes the TTS/STT provider plugin hooks:
+#   agent.tts_provider.TTSProvider
+#   agent.transcription_provider.TranscriptionProvider
+#   PluginContext.register_tts_provider / register_transcription_provider
+# The plugin checks for these at import and registration time and fails with an
+# actionable message on older builds.  No manifest key declares this because the
+# Hermes manifest schema does not yet define one.
+name: inworld-speech
+version: 1.0.0
+description: Inworld TTS and STT providers for Hermes Agent.
+author: Hermes Inworld Speech contributors
+kind: backend
+requires_env:
+  - name: INWORLD_API_KEY
+    description: "Inworld API credential for TTS and STT"
+    url: "https://platform.inworld.ai/"
+    secret: true

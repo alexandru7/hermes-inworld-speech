@@ -1,0 +1,17 @@
+# Mount the plugin read-only from the host rather than baking it into the image,
+# so it survives `docker compose up --force-recreate`. See docs/docker.md.
+#
+# Put INWORLD_API_KEY in this directory's .env (git-ignored) — never in the
+# Dockerfile and never in this file.
+
+services:
+  hermes:
+    build: .
+    environment:
+      INWORLD_API_KEY: ${INWORLD_API_KEY:?set INWORLD_API_KEY in .env}
+    volumes:
+      - hermes-data:/opt/data
+      - ../:/opt/data/plugins/inworld-speech:ro
+
+volumes:
+  hermes-data:
