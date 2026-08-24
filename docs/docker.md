@@ -67,8 +67,11 @@ USER root
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get clean
 ```
+
+Add your distribution's usual package-list cleanup to that layer if you care about image
+size.
 
 Do not put the Inworld credential in the Dockerfile.
 

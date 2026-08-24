@@ -9,7 +9,8 @@ tts:
     model: inworld-tts-2-flash
     voice: Dennis
     max_text_length: 2000     # clamped to Inworld's 2000-character ceiling
-    sample_rate_hertz: 24000
+    sample_rate_hertz: 24000  # 8000|16000|22050|24000|32000|44100|48000
+    streaming: true           # false forces the batch endpoint
     timeout_seconds: 30       # per attempt; total is this x max_attempts
     max_attempts: 3
 

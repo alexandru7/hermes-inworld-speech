@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 This project follows [semantic versioning](https://semver.org/).
 
+## 1.1.0 - 2026-08-24
+
+### Added
+
+- Streaming synthesis via `TTSProvider.stream()`, backed by Inworld's
+  `POST /tts/v1/voice:stream` NDJSON endpoint. **Dormant on current Hermes builds:**
+  `_dispatch_to_plugin_provider` calls `synthesize()` unconditionally, so nothing in
+  core invokes `stream()` yet. Verified end to end against the live API so it works
+  as soon as Hermes gains a streaming consumer.
+- Streaming support for `mp3`, `wav`, `ogg`/`opus`, `flac`, `pcm`, and `linear16`.
+- `tts.inworld.streaming` kill switch to force the batch path without downgrading.
+- Per-encoding chunk handling: `PCM` and `LINEAR16` repeat a full RIFF/WAV header
+  on every chunk, which is stripped after the first so concatenated audio does not
+  click at chunk boundaries. `WAV` carries its header on the first chunk only and
+  is passed through untouched.
+- `sample_rate_hertz` is now validated against the rates Inworld actually accepts
+  (8000, 16000, 22050, 24000, 32000, 44100, 48000) and snaps to the default with a
+  warning instead of spending a request on a guaranteed rejection.
+
+### Changed
+
+- `synthesize()` and `stream()` share one payload builder, so generation options
+  cannot drift between the batch and streaming paths.
+- Streaming retries stop once the response opens: replaying a partially consumed
+  stream would duplicate audio. Connection-time failures still retry as before.
+- An `error` object arriving mid-stream is raised rather than being mistaken for a
+  chunk, since the streaming endpoint can fail after HTTP 200 is already sent.
+
 ## 1.0.0 - 2026-08-23
 
 First public release.
