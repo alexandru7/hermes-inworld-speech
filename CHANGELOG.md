@@ -9,8 +9,10 @@ This project follows [semantic versioning](https://semver.org/).
 ### Added
 
 - Streaming synthesis via `TTSProvider.stream()`, backed by Inworld's
-  `POST /tts/v1/voice:stream` NDJSON endpoint. Audio now begins arriving before
-  synthesis completes, instead of after the whole clip is rendered.
+  `POST /tts/v1/voice:stream` NDJSON endpoint. **Dormant on current Hermes builds:**
+  `_dispatch_to_plugin_provider` calls `synthesize()` unconditionally, so nothing in
+  core invokes `stream()` yet. Verified end to end against the live API so it works
+  as soon as Hermes gains a streaming consumer.
 - Streaming support for `mp3`, `wav`, `ogg`/`opus`, `flac`, `pcm`, and `linear16`.
 - `tts.inworld.streaming` kill switch to force the batch path without downgrading.
 - Per-encoding chunk handling: `PCM` and `LINEAR16` repeat a full RIFF/WAV header

@@ -192,14 +192,24 @@ The plugin implements Hermes' optional `TTSProvider.stream()` against Inworld's
 rendered. Hermes uses it wherever it streams audio — voice-bubble delivery, for example —
 and falls back to `synthesize()` automatically anywhere it doesn't.
 
-Streaming is on by default and needs no configuration. Nothing changes for `synthesize()`.
+> **Hermes does not call `stream()` yet.** As of this writing, `_dispatch_to_plugin_provider`
+> in Hermes' `tools/tts_tool.py` calls `synthesize()` unconditionally for plugin providers;
+> `stream()` is a forward-looking hook with no consumer in core. Real streaming playback
+> needs a generic streaming consumer in Hermes itself. **Installing this plugin will not
+> change what you hear today** — the implementation is here so it works the moment Hermes
+> grows that consumer, and so the behaviour is verified in advance.
 
-Measured against the live API with a 146-character prompt on `inworld-tts-2-flash`, audio
-began arriving in roughly 210–265 ms while the full clip took 610–770 ms — so playback
-starts about two to three times sooner. `mp3` was consistently the slowest to first chunk
-(~400 ms); the other formats were tightly grouped. Treat these as one sample from one
-network, not a benchmark, and re-measure with
-[`scripts/verify_streaming.py`](scripts/verify_streaming.py) if latency matters to you.
+Measured directly against the live API with a 146-character prompt on `inworld-tts-2-flash`,
+audio began arriving in roughly 210–265 ms while the full clip took 610–770 ms — so the
+endpoint delivers first audio about two to three times sooner than batch synthesis. `mp3` was
+consistently slowest to first chunk (~400 ms); other formats were tightly grouped. That is the
+latency available *to a streaming consumer*, measured with
+[`scripts/verify_streaming.py`](scripts/verify_streaming.py), not a speed-up Hermes currently
+realises. Treat it as one sample from one network, not a benchmark.
+
+Note also that streaming cannot begin before the LLM reply is complete: `stream()` takes a
+finished `text` string. Starting audio while the model is still generating would require
+sentence-level pipelining in Hermes, which is a separate concern from this plugin.
 
 | Format | Encoding | Chunk framing |
 |---|---|---|
