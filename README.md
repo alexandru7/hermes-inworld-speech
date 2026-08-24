@@ -8,6 +8,7 @@ The plugin uses Hermes' native provider extension points — `ctx.register_tts_p
 
 - Inworld TTS-2 Flash and TTS-2
 - Inworld STT-1
+- Streaming synthesis, so playback can start before the whole clip is rendered
 - Inworld system and custom voice discovery, with a built-in fallback list
 - MP3, WAV, OGG/Opus, and FLAC TTS output
 - Speaking-rate, delivery-mode, and speaking-style control
@@ -153,8 +154,11 @@ Settings under `tts.inworld`:
 | `temperature` | unset (`1.0`) | Expressiveness in `(0, 2]`. **Ignored by `inworld-tts-2`.** |
 | `apply_text_normalization` | unset | `ON` / `OFF` |
 | `enhance_generation` | unset | Optional denoising flag |
+| `streaming` | `true` | Set `false` to disable streaming synthesis and force the batch path |
 | `timeout_seconds` | `30` | Per-attempt HTTP timeout |
 | `max_attempts` | `3` | Attempts for retryable HTTP/network failures |
+
+`sample_rate_hertz` must be one of `8000`, `16000`, `22050`, `24000`, `32000`, `44100`, or `48000`. Anything else is rejected by Inworld, so the plugin warns and falls back to `24000` rather than spending a request on it.
 
 `delivery_mode` and `temperature` apply to *different* models: `delivery_mode` works only on `inworld-tts-2`, which is also the model that ignores `temperature`. On the default `inworld-tts-2-flash`, `temperature` applies and `delivery_mode` does not.
 
@@ -182,6 +186,51 @@ Settings under `stt.inworld`:
 | `max_attempts` | `3` | Attempts for retryable HTTP/network failures |
 
 The plugin sends complete audio files to Inworld's synchronous STT endpoint using `AUTO_DETECT` audio encoding. Because the file is base64-encoded into a JSON body, a request costs roughly three times the file size in memory — hence the `max_file_bytes` cap. Inworld recommends 16 kHz mono PCM for optimal STT quality when you control the recording format.
+
+## Streaming synthesis
+
+The plugin implements Hermes' optional `TTSProvider.stream()` against Inworld's
+`POST /tts/v1/voice:stream` endpoint, so audio starts arriving before the full clip is
+rendered. Hermes uses it wherever it streams audio — voice-bubble delivery, for example —
+and falls back to `synthesize()` automatically anywhere it doesn't.
+
+Streaming is on by default and needs no configuration. Nothing changes for `synthesize()`.
+
+Measured against the live API with a 146-character prompt on `inworld-tts-2-flash`, audio
+began arriving in roughly 210–265 ms while the full clip took 610–770 ms — so playback
+starts about two to three times sooner. `mp3` was consistently the slowest to first chunk
+(~400 ms); the other formats were tightly grouped. Treat these as one sample from one
+network, not a benchmark, and re-measure with
+[`scripts/verify_streaming.py`](scripts/verify_streaming.py) if latency matters to you.
+
+| Format | Encoding | Chunk framing |
+|---|---|---|
+| `mp3` | `MP3` | Container-framed; chunks concatenate directly |
+| `wav` | `WAV` | Header on the first chunk only |
+| `ogg` / `opus` | `OGG_OPUS` | Container-framed |
+| `flac` | `FLAC` | Container-framed |
+| `pcm` | `PCM` | Repeats a full RIFF header per chunk — stripped after the first |
+| `linear16` | `LINEAR16` | Repeats a full RIFF header per chunk — stripped after the first |
+
+That last distinction matters: Inworld returns `PCM` and `LINEAR16` chunks as complete
+standalone WAV files so each can be played on its own. Concatenating them unmodified
+produces an audible click at every chunk boundary, so the plugin strips the repeated
+header. `WAV` behaves differently — one header, at the start — and is passed through
+untouched.
+
+If a format you request ever turns out to repeat container headers when it shouldn't, the
+plugin strips them anyway and logs a warning naming the chunk. Please report that.
+
+To disable streaming without downgrading the plugin:
+
+```bash
+hermes config set tts.inworld.streaming false
+```
+
+Streaming changes the failure model. Retries stop once the response opens, because
+replaying a partially delivered stream would duplicate audio — so a connection dropped
+mid-stream surfaces as an error rather than being retried. Connection-time failures
+(`408`, `429`, `5xx`) still retry normally.
 
 ## Timeouts and retries
 

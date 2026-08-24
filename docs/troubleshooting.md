@@ -112,15 +112,35 @@ Supported formats are MP3, WAV, OGG/Opus, and FLAC. An unrecognized value falls 
 
 The plugin requests Inworld's `WAV` encoding for `wav`, not `LINEAR16` — `LINEAR16` is raw headerless PCM, which most players reject when handed to them in a `.wav` file.
 
-## 9. The output file is not where I expected
+## 9. Streamed audio clicks, stutters, or will not play
+
+Streaming uses a different endpoint and different chunk handling from
+`synthesize()`. First, confirm the batch path is healthy by disabling streaming:
+
+```bash
+hermes config set tts.inworld.streaming false
+```
+
+If that fixes it, the problem is in the streaming path — please report it with the
+format you were using. Enable `DEBUG` logging (step 0) and look for
+`Inworld TTS stream complete: N chunk(s)` to confirm chunks arrived, and for any
+`repeated a RIFF header` warning, which means the encoding framed its chunks
+differently than documented.
+
+Clicking at regular intervals specifically indicates repeated container headers
+inside the audio. The plugin strips those for `PCM` and `LINEAR16`, which are the
+encodings Inworld documents as repeating them; `mp3` is the most exercised
+streaming format if you need a known-good baseline.
+
+## 10. The output file is not where I expected
 
 The plugin returns the path it actually wrote and Hermes should use that return value. It appends the format's extension unless the supplied path already carries an audio extension, in which case it replaces it. Paths containing dots (`reply_2026.08.23`) keep their full name — the extension is appended, never substituted into the middle.
 
-## 10. PortAudio errors
+## 11. PortAudio errors
 
 PortAudio errors come from Hermes server-side CLI voice mode. They do not indicate that the Inworld HTTP provider is broken. Only install PortAudio if the machine/container running Hermes must access a local sound device.
 
-## 11. HTTP 401/403
+## 12. HTTP 401/403
 
 Check:
 
@@ -131,7 +151,7 @@ Check:
 
 The plugin accepts either a plain Base64 value or a value prefixed with `Basic ` and normalizes the latter.
 
-## 12. HTTP 429/5xx
+## 13. HTTP 429/5xx
 
 The plugin retries `408`, `429`, and `5xx` up to `max_attempts` (default 3), with exponential backoff that honours `Retry-After` up to 10 seconds. Retries are also bounded by an overall deadline of `timeout_seconds × max_attempts` — about 90 seconds on the defaults — after which it gives up rather than stalling Hermes further.
 
@@ -151,17 +171,17 @@ stt:
 
 Persistent 429s usually mean an account rate limit or an exhausted balance rather than a plugin fault.
 
-## 13. Voice list is unavailable
+## 14. Voice list is unavailable
 
 Voice discovery is optional. If Inworld's voice-list endpoint fails, the plugin logs a warning and falls back to a minimal built-in list so TTS can still be configured. Custom voice IDs can always be entered directly in config.
 
-## 14. STT returns no transcript
+## 15. STT returns no transcript
 
 Try a standard audio format with a header (WAV, MP3, FLAC, or OGG/Opus), and make sure the recording actually contains speech. Inworld recommends 16 kHz mono PCM for optimal quality when you control the recording format.
 
 STT failures return an error envelope rather than raising, so check the logs or the returned `error` field for the specific cause.
 
-## 15. STT rejects a large file
+## 16. STT rejects a large file
 
 Audio is base64-encoded into a JSON request body, so a request costs roughly three times the file size in memory. The plugin caps this at 25 MiB by default. Split long recordings, or raise the cap deliberately:
 
@@ -171,6 +191,6 @@ stt:
     max_file_bytes: 52428800
 ```
 
-## 16. `INWORLD_API_BASE_URL` is rejected
+## 17. `INWORLD_API_BASE_URL` is rejected
 
 The override must use `https`. Plain `http` is permitted only for loopback addresses, so the credential cannot be sent in cleartext to a remote host. Unset the variable to return to `https://api.inworld.ai`.

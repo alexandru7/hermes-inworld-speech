@@ -29,6 +29,21 @@ Use this checklist before publishing a release.
    - at least one custom voice ID
    - each output format actually plays (`mp3`, `wav`, `ogg`, `flac`)
    - a non-default speaking rate audibly changes the output
+   - **streaming**: for each of `mp3`, `wav`, `ogg`/`opus`, `flac`, `pcm`, and
+     `linear16`, concatenate the streamed chunks and confirm the result decodes
+     cleanly and plays without clicks at chunk boundaries:
+
+     ```bash
+     ffmpeg -v error -i streamed.out -f null -
+     ```
+
+     `ogg`/`opus` and `flac` deserve particular attention — Inworld documents
+     per-chunk header behavior for `PCM`/`LINEAR16` and `WAV` but not for these,
+     and no official Inworld example exercises them. Watch the logs for
+     `repeated a RIFF header`, and update `_PER_CHUNK_RIFF_ENCODINGS` in
+     `providers.py` if reality differs from the documentation.
+   - streaming falls back correctly: set `tts.inworld.streaming: false` and
+     confirm audio still plays via `synthesize()`
    - STT with WAV or MP3 input
    - missing/invalid credential failure behavior
    - Docker environment injection, with the key **absent** from the profile `.env`

@@ -6,7 +6,7 @@
 # actionable message on older builds.  No manifest key declares this because the
 # Hermes manifest schema does not yet define one.
 name: inworld-speech
-version: 1.0.0
+version: 1.1.0
 description: Inworld TTS and STT providers for Hermes Agent.
 author: Hermes Inworld Speech contributors
 kind: backend

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,68 @@ _FORMAT_MAP: dict[str, tuple[str, str]] = {
 }
 
 _AUDIO_SUFFIXES = {".mp3", ".wav", ".ogg", ".opus", ".flac"}
+
+# Sample rates Inworld accepts.  Anything else is rejected server-side, so snap
+# to the default rather than sending a request that is certain to 400.
+SUPPORTED_SAMPLE_RATES = (8000, 16000, 22050, 24000, 32000, 44100, 48000)
+
+# Formats the streaming endpoint can produce, mapped to Hermes' format names.
+# Every value here is also a valid batch encoding.
+_STREAM_FORMATS: dict[str, str] = {
+    "mp3": "MP3",
+    "wav": "WAV",
+    "ogg": "OGG_OPUS",
+    "opus": "OGG_OPUS",
+    "flac": "FLAC",
+    "pcm": "PCM",
+    "linear16": "LINEAR16",
+}
+
+# Encodings that may repeat a full RIFF/WAV header on *every* streamed chunk so
+# each chunk plays standalone.  Concatenating those unmodified yields an audible
+# click at every boundary, so the header is stripped from all but the first.
+#
+# Observed against the live API on 2026-08-24 (scripts/verify_streaming.py):
+#
+#   PCM       raw headerless samples, no RIFF header anywhere
+#   LINEAR16  RIFF header on the first chunk only
+#   WAV       RIFF header on the first chunk only
+#   OGG_OPUS  proper page-based stream; every chunk starts with an OggS page
+#             marker, which is how Ogg works - it is NOT a repeated file header
+#             and must not be stripped
+#   MP3/FLAC  container-framed, concatenate directly
+#
+# That contradicts Inworld's API reference, which claims PCM and LINEAR16 carry
+# a header on every chunk.  Both entries are kept as belt-and-braces: the check
+# in _strip_riff_header() verifies the RIFF/WAVE magic before removing anything,
+# so on the observed behaviour it is a no-op, and it still protects if a model
+# or sample-rate combination ever does repeat headers.
+_PER_CHUNK_RIFF_ENCODINGS = {"PCM", "LINEAR16"}
+
+_RIFF_HEADER_BYTES = 44
+
+
+def _sample_rate(cfg: dict[str, Any]) -> int:
+    rate = _positive_int(
+        cfg.get("sample_rate_hertz"), DEFAULT_SAMPLE_RATE_HZ, "tts.inworld.sample_rate_hertz"
+    )
+    if rate not in SUPPORTED_SAMPLE_RATES:
+        logger.warning(
+            "tts.inworld.sample_rate_hertz=%s is not supported by Inworld (%s); using %s.",
+            rate,
+            ", ".join(str(r) for r in SUPPORTED_SAMPLE_RATES),
+            DEFAULT_SAMPLE_RATE_HZ,
+        )
+        return DEFAULT_SAMPLE_RATE_HZ
+    return rate
+
+
+def _strip_riff_header(chunk: bytes) -> bytes:
+    """Drop a leading 44-byte RIFF/WAVE header if this chunk carries one."""
+
+    if len(chunk) > _RIFF_HEADER_BYTES and chunk[:4] == b"RIFF" and chunk[8:12] == b"WAVE":
+        return chunk[_RIFF_HEADER_BYTES:]
+    return chunk
 
 
 def _provider_config(section: str) -> dict[str, Any]:
@@ -259,24 +322,24 @@ class InworldTTSProvider(TTSProvider):
     def voice_compatible(self) -> bool:
         return True
 
-    def synthesize(
+    def _build_payload(
         self,
         text: str,
-        output_path: str,
+        encoding: str,
+        cfg: dict[str, Any],
         *,
-        voice: str | None = None,
-        model: str | None = None,
-        speed: float | None = None,
-        format: str = "mp3",
-        **extra: Any,
-    ) -> str:
-        cfg = _provider_config("tts")
+        voice: str | None,
+        model: str | None,
+        speed: float | None,
+    ) -> dict[str, Any]:
+        """Build the request body shared by synthesize() and stream().
+
+        Both paths must agree on voice, model, and every generation option;
+        keeping one builder is what stops them drifting.
+        """
+
         selected_voice = voice or cfg.get("voice") or DEFAULT_TTS_VOICE
         selected_model = model or cfg.get("model") or DEFAULT_TTS_MODEL
-        sample_rate = _positive_int(
-            cfg.get("sample_rate_hertz"), DEFAULT_SAMPLE_RATE_HZ, "tts.inworld.sample_rate_hertz"
-        )
-        encoding, target = _tts_encoding_and_path(format, output_path)
 
         limit = _max_text_length(cfg)
         if len(text) > limit:
@@ -288,7 +351,7 @@ class InworldTTSProvider(TTSProvider):
 
         audio_config: dict[str, Any] = {
             "audioEncoding": encoding,
-            "sampleRateHertz": sample_rate,
+            "sampleRateHertz": _sample_rate(cfg),
         }
 
         # Hermes passes a generic speed argument; Inworld exposes it as
@@ -356,6 +419,101 @@ class InworldTTSProvider(TTSProvider):
             encoding,
             len(text),
         )
+        return payload
+
+    def stream(
+        self,
+        text: str,
+        *,
+        voice: str | None = None,
+        model: str | None = None,
+        format: str = "opus",
+        **extra: Any,
+    ) -> Iterator[bytes]:
+        """Yield audio chunks as Inworld produces them.
+
+        Deliberately *not* a generator function.  The base-class contract is
+        that an unsupported provider raises NotImplementedError when ``stream``
+        is **called**, which is Hermes' signal to fall back to synthesize().  A
+        generator body would defer that raise until the first iteration, by
+        which point the dispatcher has already committed to the streaming path.
+        So validate eagerly here and return a separate generator.
+        """
+
+        cfg = _provider_config("tts")
+
+        if cfg.get("streaming") is False:
+            raise NotImplementedError(
+                "Inworld streaming synthesis is disabled via tts.inworld.streaming."
+            )
+
+        requested = (format or "opus").strip().lower()
+        encoding = _STREAM_FORMATS.get(requested)
+        if encoding is None:
+            raise NotImplementedError(
+                f"Inworld streaming synthesis does not support format {requested!r}. "
+                f"Supported: {', '.join(sorted(_STREAM_FORMATS))}."
+            )
+
+        # The base signature omits `speed` even though its docstring says the
+        # args mirror synthesize(), so accept it from **extra if Hermes sends it.
+        payload = self._build_payload(
+            text, encoding, cfg, voice=voice, model=model, speed=extra.get("speed")
+        )
+        return self._iter_audio_chunks(payload, encoding)
+
+    def _iter_audio_chunks(self, payload: dict[str, Any], encoding: str) -> Iterator[bytes]:
+        strip_every_chunk = encoding in _PER_CHUNK_RIFF_ENCODINGS
+        index = 0
+
+        for message in _client_for("tts").request_ndjson("POST", "/tts/v1/voice:stream", payload):
+            result = message.get("result")
+            if not isinstance(result, dict):
+                continue
+            encoded = result.get("audioContent")
+            if not isinstance(encoded, str) or not encoded:
+                continue
+
+            try:
+                chunk = base64.b64decode(encoded, validate=True)
+            except Exception as exc:
+                raise RuntimeError("Inworld TTS stream returned invalid base64 audio.") from exc
+
+            if index and (strip_every_chunk or chunk[:4] == b"RIFF"):
+                stripped = _strip_riff_header(chunk)
+                if stripped is not chunk and not strip_every_chunk:
+                    # Only reachable if an encoding we expected to be
+                    # container-framed repeats headers instead; worth knowing.
+                    logger.warning(
+                        "Inworld %s stream repeated a RIFF header on chunk %d; "
+                        "stripping it. Please report this against the plugin.",
+                        encoding,
+                        index,
+                    )
+                chunk = stripped
+
+            if chunk:
+                index += 1
+                yield chunk
+
+        if not index:
+            raise RuntimeError("Inworld TTS stream produced no audio.")
+        logger.debug("Inworld TTS stream complete: %d chunk(s), encoding=%s.", index, encoding)
+
+    def synthesize(
+        self,
+        text: str,
+        output_path: str,
+        *,
+        voice: str | None = None,
+        model: str | None = None,
+        speed: float | None = None,
+        format: str = "mp3",
+        **extra: Any,
+    ) -> str:
+        cfg = _provider_config("tts")
+        encoding, target = _tts_encoding_and_path(format, output_path)
+        payload = self._build_payload(text, encoding, cfg, voice=voice, model=model, speed=speed)
 
         result = _client_for("tts").request_json("POST", "/tts/v1/voice", payload)
         audio_content = result.get("audioContent")

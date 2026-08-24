@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -20,6 +21,10 @@ DEFAULT_MAX_ATTEMPTS = 3
 
 _RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 _MAX_RETRY_SLEEP_SECONDS = 10.0
+
+# Socket read size while consuming an NDJSON stream.  Inworld audio chunks are
+# large base64 strings, so a single line routinely spans several reads.
+STREAM_READ_BLOCK = 16384
 
 # ``http://`` is tolerated only for a loopback proxy, where the credential never
 # leaves the host.  Anything else must be TLS.
@@ -89,6 +94,30 @@ def _safe_error_body(exc: HTTPError, limit: int = 4096) -> str:
     return text
 
 
+def _decode_stream_line(line: bytes) -> dict[str, Any]:
+    """Parse one NDJSON line, surfacing an in-band ``error`` object.
+
+    The streaming endpoint can report a failure mid-stream in the body rather
+    than through an HTTP status, so an error line must not be mistaken for an
+    ordinary chunk.
+    """
+
+    try:
+        decoded = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Inworld stream returned a malformed JSON line.") from exc
+
+    if not isinstance(decoded, dict):
+        raise RuntimeError("Inworld stream returned an unexpected JSON line shape.")
+
+    error = decoded.get("error")
+    if error:
+        message = error.get("message") if isinstance(error, dict) else None
+        raise RuntimeError(f"Inworld stream error: {message or error}")
+
+    return decoded
+
+
 def _retry_delay(attempt: int, retry_after: str | None) -> float:
     if retry_after:
         try:
@@ -115,12 +144,12 @@ class InworldClient:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_attempts: int = DEFAULT_MAX_ATTEMPTS
 
-    def request_json(
+    def _build_request(
         self,
         method: str,
         path: str,
-        payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+        payload: dict[str, Any] | None,
+    ) -> Request:
         key = get_api_key()
         if not key:
             raise RuntimeError(
@@ -129,7 +158,7 @@ class InworldClient:
             )
 
         body = None if payload is None else json.dumps(payload).encode("utf-8")
-        request = Request(
+        return Request(
             api_root() + path,
             data=body,
             headers={
@@ -140,6 +169,14 @@ class InworldClient:
             },
             method=method.upper(),
         )
+
+    def request_json(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request = self._build_request(method, path, payload)
 
         attempts = max(1, self.max_attempts)
         deadline = time.monotonic() + (self.timeout_seconds * attempts)
@@ -206,3 +243,103 @@ class InworldClient:
                 time.sleep(delay)
 
         raise last_error or RuntimeError("Inworld request failed.")
+
+    def open_stream(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        """Open a streaming response, retrying only until the response opens.
+
+        Retries stop here deliberately.  Once ``request_ndjson`` has handed a
+        chunk to its caller the audio is already in flight, and replaying the
+        request would duplicate it.
+        """
+
+        request = self._build_request(method, path, payload)
+        attempts = max(1, self.max_attempts)
+        deadline = time.monotonic() + (self.timeout_seconds * attempts)
+        last_error: Exception | None = None
+
+        for attempt in range(attempts):
+            remaining = deadline - time.monotonic()
+            if attempt and remaining <= 0:
+                break
+
+            timeout = self.timeout_seconds if not attempt else min(self.timeout_seconds, remaining)
+            try:
+                return urlopen(request, timeout=timeout)
+            except HTTPError as exc:
+                detail = _safe_error_body(exc)
+                last_error = RuntimeError(f"Inworld HTTP {exc.code}: {detail or exc.reason}")
+                if exc.code not in _RETRYABLE_STATUS or attempt + 1 >= attempts:
+                    raise last_error from exc
+                delay = _retry_delay(attempt, exc.headers.get("Retry-After"))
+                if delay >= deadline - time.monotonic():
+                    raise last_error from exc
+                logger.warning(
+                    "Inworld stream %s returned HTTP %s; retrying in %.1fs (attempt %d/%d).",
+                    path,
+                    exc.code,
+                    delay,
+                    attempt + 1,
+                    attempts,
+                )
+                time.sleep(delay)
+            except URLError as exc:
+                last_error = RuntimeError(f"Inworld connection error: {exc.reason}")
+                if attempt + 1 >= attempts:
+                    raise last_error from exc
+                delay = _retry_delay(attempt, None)
+                if delay >= deadline - time.monotonic():
+                    raise last_error from exc
+                logger.warning(
+                    "Inworld stream %s failed (%s); retrying in %.1fs (attempt %d/%d).",
+                    path,
+                    exc.reason,
+                    delay,
+                    attempt + 1,
+                    attempts,
+                )
+                time.sleep(delay)
+
+        raise last_error or RuntimeError("Inworld stream could not be opened.")
+
+    def request_ndjson(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield newline-delimited JSON objects as Inworld produces them.
+
+        A single audio line routinely spans several socket reads, so partial
+        lines are buffered until a newline arrives.  The stream is bounded by
+        the same wall-clock budget as a unary request.
+        """
+
+        response = self.open_stream(method, path, payload)
+        deadline = time.monotonic() + (self.timeout_seconds * max(1, self.max_attempts))
+
+        with response:
+            buffer = b""
+            while True:
+                block = response.read(STREAM_READ_BLOCK)
+                if not block:
+                    break
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"Inworld stream {path} exceeded its "
+                        f"{self.timeout_seconds * max(1, self.max_attempts):.0f}s budget."
+                    )
+                buffer += block
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    if line.strip():
+                        yield _decode_stream_line(line)
+
+            # A well-behaved stream ends with a newline, but the final line may
+            # arrive without one.
+            if buffer.strip():
+                yield _decode_stream_line(buffer)
