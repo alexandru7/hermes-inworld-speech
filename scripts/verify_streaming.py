@@ -84,10 +84,12 @@ def _describe_head(chunk: bytes) -> str:
         return "FLAC file header"
     if chunk[:3] == b"ID3":
         return "ID3 tag"
-    if chunk[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
-        return "MP3 frame"
-    if chunk[:2] == b"\xff\xf8":
-        return "FLAC frame"
+    # Frame sync words, compared as integers rather than escaped byte literals.
+    if len(chunk) >= 2 and chunk[0] == 0xFF:
+        if chunk[1] in (0xFB, 0xF3, 0xF2):
+            return "MP3 frame"
+        if chunk[1] == 0xF8:
+            return "FLAC frame"
     return "raw/unrecognized"
 
 

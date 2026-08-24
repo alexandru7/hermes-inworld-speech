@@ -76,12 +76,10 @@ Add the credential to the active Hermes profile `.env`:
 INWORLD_API_KEY=YOUR_BASE64_INWORLD_API_KEY
 ```
 
-Or export it before starting Hermes:
-
-```bash
-export INWORLD_API_KEY='YOUR_BASE64_INWORLD_API_KEY'
-hermes
-```
+Alternatively, provide `INWORLD_API_KEY` through the environment of whatever process
+starts Hermes — your shell profile, a systemd unit's `Environment=`, or your container
+runtime. The plugin reads the profile `.env` first and falls back to the process
+environment, so either source works.
 
 For containers, inject the secret at runtime rather than baking it into an image:
 
