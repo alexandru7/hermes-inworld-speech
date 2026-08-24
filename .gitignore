@@ -7,3 +7,6 @@ __pycache__/
 .DS_Store
 coverage.xml
 htmlcov/
+
+# Output of scripts/verify_streaming.py
+streaming-check/
